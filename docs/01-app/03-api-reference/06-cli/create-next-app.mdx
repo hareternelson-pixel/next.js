@@ -1,99 +1,516 @@
----
-title: create-next-app
-description: Create Next.js apps using one command with the create-next-app CLI.
----
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
-{/* The content of this doc is shared between the app and pages router. You can use the `<PagesOnly>Content</PagesOnly>` component to add content that is specific to the Pages Router. Any shared content should not be wrapped in a component. */}
+/**
+ * Osun Youth Connect – Web MVP
+ * Single-file React app with Tailwind classes.
+ *
+ * Features
+ * - Two tabs: Study Planner | Opportunities
+ * - Add exams, auto-generate daily study blocks until exam day
+ * - Persist to localStorage
+ * - Basic notifications test (browser) and daily reminder time
+ * - Jobs board with add/list/filter/save
+ * - CSV export/import (planner & jobs)
+ *
+ * Notes
+ * - No backend required. Everything runs client-side.
+ * - Later, connect to Firebase/Airtable by replacing the local persistence helpers.
+ */
 
-The `create-next-app` CLI allow you to create a new Next.js application using the default template or an [example](https://github.com/vercel/next.js/tree/canary/examples) from a public GitHub repository. It is the easiest way to get started with Next.js.
+// ---------------------- Helpers ----------------------
+const LS_KEYS = {
+  exams: "oyc_exams_v1",
+  jobs: "oyc_jobs_v1",
+  settings: "oyc_settings_v1",
+  savedJobs: "oyc_saved_jobs_v1",
+};
 
-Basic usage:
+function loadLS(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (e) {
+    return fallback;
+  }
+}
+function saveLS(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (e) {}
+}
 
-```bash filename="Terminal"
-npx create-next-app@latest [project-name] [options]
-```
+function formatDateInputValue(d) {
+  // Returns YYYY-MM-DDThh:mm for <input type="datetime-local">
+  const pad = (n) => String(n).padStart(2, "0");
+  const year = d.getFullYear();
+  const month = pad(d.getMonth() + 1);
+  const day = pad(d.getDate());
+  const h = pad(d.getHours());
+  const m = pad(d.getMinutes());
+  return `${year}-${month}-${day}T${h}:${m}`;
+}
 
-## Reference
+function toLocalDate(dateLike) {
+  return typeof dateLike === "string" ? new Date(dateLike) : dateLike;
+}
 
-The following options are available:
+function daysBetween(a, b) {
+  const MS = 24 * 60 * 60 * 1000;
+  const start = new Date(a.getFullYear(), a.getMonth(), a.getDate()).getTime();
+  const end = new Date(b.getFullYear(), b.getMonth(), b.getDate()).getTime();
+  return Math.max(0, Math.round((end - start) / MS));
+}
 
-| Options                                 | Description                                                     |
-| --------------------------------------- | --------------------------------------------------------------- |
-| `-h` or `--help`                        | Show all available options                                      |
-| `-v` or `--version`                     | Output the version number                                       |
-| `--no-*`                                | Negate default options. E.g. `--no-ts`                          |
-| `--ts` or `--typescript`                | Initialize as a TypeScript project (default)                    |
-| `--js` or `--javascript`                | Initialize as a JavaScript project                              |
-| `--tailwind`                            | Initialize with Tailwind CSS config (default)                   |
-| `--eslint`                              | Initialize with ESLint config                                   |
-| `--biome`                               | Initialize with Biome config                                    |
-| `--no-linter`                           | Skip linter configuration                                       |
-| `--app`                                 | Initialize as an App Router project                             |
-| `--api`                                 | Initialize a project with only route handlers                   |
-| `--src-dir`                             | Initialize inside a `src/` directory                            |
-| `--turbopack`                           | Enable Turbopack by default for development                     |
-| `--import-alias <alias-to-configure>`   | Specify import alias to use (default "@/\*")                    |
-| `--empty`                               | Initialize an empty project                                     |
-| `--use-npm`                             | Explicitly tell the CLI to bootstrap the application using npm  |
-| `--use-pnpm`                            | Explicitly tell the CLI to bootstrap the application using pnpm |
-| `--use-yarn`                            | Explicitly tell the CLI to bootstrap the application using Yarn |
-| `--use-bun`                             | Explicitly tell the CLI to bootstrap the application using Bun  |
-| `-e` or `--example [name] [github-url]` | An example to bootstrap the app with                            |
-| `--example-path <path-to-example>`      | Specify the path to the example separately                      |
-| `--reset-preferences`                   | Explicitly tell the CLI to reset any stored preferences         |
-| `--skip-install`                        | Explicitly tell the CLI to skip installing packages             |
-| `--disable-git`                         | Explicitly tell the CLI to disable git initialization           |
-| `--yes`                                 | Use previous preferences or defaults for all options            |
+function addDays(d, n) {
+  const nd = new Date(d);
+  nd.setDate(nd.getDate() + n);
+  return nd;
+}
 
-## Examples
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
 
-### With the default template
+function niceDateTime(dtStr) {
+  const d = new Date(dtStr);
+  return d.toLocaleString();
+}
 
-To create a new app using the default template, run the following command in your terminal:
+function exportCSV(filename, rows) {
+  const process = (v) => {
+    if (v == null) return "";
+    const s = String(v).replace(/"/g, '""');
+    return /[",\n]/.test(s) ? `"${s}"` : s;
+  };
+  const csv = rows.map((r) => r.map(process).join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
-```bash filename="Terminal"
-npx create-next-app@latest
-```
+function importCSV(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const text = reader.result;
+        const lines = String(text).split(/\r?\n/).filter(Boolean);
+        const rows = lines.map((line) => {
+          // naive CSV split (works for our simple data); not handling quoted commas fully
+          return line.split(",").map((c) => c.trim());
+        });
+        resolve(rows);
+      } catch (e) {
+        reject(e);
+      }
+    };
+    reader.onerror = reject;
+    reader.readAsText(file);
+  });
+}
 
-You will then be asked the following prompts:
+// ---------------------- Study Plan Logic ----------------------
+function generateStudyBlocks({ startDate, examDate, preferredDailyStart = 18, blockMinutes = 50, daysPerWeek = 7 }) {
+  // Generate one 50-min block per day by default, with a small revision push in the last 3 days
+  const today = new Date(startDate);
+  const exam = new Date(examDate);
+  const totalDays = daysBetween(today, exam) + 1; // include today
+  if (totalDays <= 0) return [];
 
-```txt filename="Terminal"
-What is your project named?  my-app
-Would you like to use TypeScript?  No / Yes
-Which linter would you like to use?  ESLint / Biome / None
-Would you like to use Tailwind CSS?  No / Yes
-Would you like your code inside a `src/` directory?  No / Yes
-Would you like to use App Router? (recommended)  No / Yes
-Would you like to use Turbopack? (recommended)  No / Yes
-Would you like to customize the import alias (`@/*` by default)?  No / Yes
-```
+  let totalBlocks = Math.ceil(totalDays * 1.0); // 1 per day
+  totalBlocks = clamp(totalBlocks, 6, 20);
 
-### Linter Options
+  const last3 = Math.min(3, totalDays);
+  const revisionBlocks = Math.ceil(totalBlocks * 0.25);
+  const baseBlocks = totalBlocks - revisionBlocks;
 
-**ESLint**: The traditional and most popular JavaScript linter. Includes Next.js-specific rules from `eslint-plugin-next`.
+  const blocks = [];
+  // Distribute base blocks across days except last 3
+  const normalDays = Math.max(0, totalDays - last3);
+  let assigned = 0;
+  for (let i = 0; i < normalDays; i++) {
+    const date = addDays(today, i);
+    const start = new Date(date);
+    start.setHours(preferredDailyStart, 0, 0, 0);
+    const end = new Date(start.getTime() + blockMinutes * 60 * 1000);
+    blocks.push({ start: start.toISOString(), end: end.toISOString(), type: "study" });
+    assigned++;
+    if (assigned >= baseBlocks) break;
+  }
 
-**Biome**: A fast, modern linter and formatter that combines the functionality of ESLint and Prettier. Includes built-in Next.js and React domain support for optimal performance.
+  // Put revision blocks in last 3 days
+  const eachLastDay = Math.max(1, Math.floor(revisionBlocks / last3));
+  let remaining = revisionBlocks;
+  for (let i = totalDays - last3; i < totalDays; i++) {
+    const date = addDays(today, i);
+    const count = Math.min(eachLastDay, remaining);
+    for (let k = 0; k < count; k++) {
+      const start = new Date(date);
+      start.setHours(preferredDailyStart + k, 0, 0, 0); // spread if multiple
+      const end = new Date(start.getTime() + blockMinutes * 60 * 1000);
+      blocks.push({ start: start.toISOString(), end: end.toISOString(), type: "revision" });
+      remaining--;
+      if (remaining <= 0) break;
+    }
+    if (remaining <= 0) break;
+  }
 
-**None**: Skip linter configuration entirely. You can always add a linter later.
+  // Sort blocks by time
+  blocks.sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
+  return blocks;
+}
 
-> **Note**: `next lint` command will be deprecated in Next.js 16. New projects should use the chosen linter directly (e.g., `biome check` or `eslint`).
+// ---------------------- Main App ----------------------
+export default function App() {
+  const [tab, setTab] = useState("study");
 
-Once you've answered the prompts, a new project will be created with your chosen configuration.
+  // Settings
+  const [settings, setSettings] = useState(() => loadLS(LS_KEYS.settings, { dailyReminderHour: 7, notificationsEnabled: false }));
+  useEffect(() => saveLS(LS_KEYS.settings, settings), [settings]);
 
-### With an official Next.js example
+  // Exams
+  const [exams, setExams] = useState(() => loadLS(LS_KEYS.exams, []));
+  useEffect(() => saveLS(LS_KEYS.exams, exams), [exams]);
 
-To create a new app using an official Next.js example, use the `--example` flag. For example:
+  // Jobs
+  const [jobs, setJobs] = useState(() => loadLS(LS_KEYS.jobs, demoJobs));
+  useEffect(() => saveLS(LS_KEYS.jobs, jobs), [jobs]);
+  const [saved, setSaved] = useState(() => new Set(loadLS(LS_KEYS.savedJobs, [])));
+  useEffect(() => saveLS(LS_KEYS.savedJobs, Array.from(saved)), [saved]);
 
-```bash filename="Terminal"
-npx create-next-app@latest --example [example-name] [your-project-name]
-```
+  // Notification permission (browser)
+  const requestNotif = async () => {
+    if (!("Notification" in window)) return alert("Notifications not supported in this browser");
+    const perm = await Notification.requestPermission();
+    if (perm === "granted") {
+      setSettings((s) => ({ ...s, notificationsEnabled: true }));
+      new Notification("Notifications enabled ✅", { body: "We'll remind you at your chosen time." });
+    }
+  };
 
-You can view a list of all available examples along with setup instructions in the [Next.js repository](https://github.com/vercel/next.js/tree/canary/examples).
+  // Fire a simple daily reminder when the tab is open (best-effort client-only)
+  useEffect(() => {
+    if (!settings.notificationsEnabled) return;
+    const check = () => {
+      const now = new Date();
+      if (now.getHours() === Number(settings.dailyReminderHour) && now.getMinutes() === 0) {
+        try {
+          new Notification("Study Reminder", { body: "Open your study plan for today." });
+        } catch {}
+      }
+    };
+    const id = setInterval(check, 60 * 1000);
+    return () => clearInterval(id);
+  }, [settings.notificationsEnabled, settings.dailyReminderHour]);
 
-### With any public GitHub example
+  return (
+    <div className="min-h-screen bg-gray-50 text-gray-900">
+      <header className="sticky top-0 z-10 bg-white/80 backdrop-blur border-b">
+        <div className="max-w-5xl mx-auto px-4 py-4 flex items-center justify-between">
+          <h1 className="text-xl sm:text-2xl font-bold">Osun Youth Connect</h1>
+          <nav className="flex gap-2">
+            <button onClick={() => setTab("study")} className={`px-3 py-1.5 rounded-full text-sm ${tab === "study" ? "bg-black text-white" : "bg-gray-200"}`}>Study Planner</button>
+            <button onClick={() => setTab("jobs")} className={`px-3 py-1.5 rounded-full text-sm ${tab === "jobs" ? "bg-black text-white" : "bg-gray-200"}`}>Opportunities</button>
+            <button onClick={() => setTab("settings")} className={`px-3 py-1.5 rounded-full text-sm ${tab === "settings" ? "bg-black text-white" : "bg-gray-200"}`}>Settings</button>
+          </nav>
+        </div>
+      </header>
 
-To create a new app using any public GitHub example, use the `--example` option with the GitHub repo's URL. For example:
+      <main className="max-w-5xl mx-auto px-4 py-6">
+        {tab === "study" && (
+          <StudyPlanner exams={exams} setExams={setExams} />
+        )}
+        {tab === "jobs" && (
+          <Opportunities jobs={jobs} setJobs={setJobs} saved={saved} setSaved={setSaved} />
+        )}
+        {tab === "settings" && (
+          <Settings settings={settings} setSettings={setSettings} requestNotif={requestNotif} />
+        )}
+      </main>
 
-```bash filename="Terminal"
-npx create-next-app@latest --example "https://github.com/.../" [your-project-name]
-```
+      <footer className="border-t py-6 text-center text-xs text-gray-500">
+        Supported by Osun Youth Future Initiative • Privacy-first • Local device storage
+      </footer>
+    </div>
+  );
+}
+
+// ---------------------- Study Planner ----------------------
+function StudyPlanner({ exams, setExams }) {
+  const [form, setForm] = useState({ courseCode: "", courseName: "", examDate: formatDateInputValue(addDays(new Date(), 7)) });
+
+  const addExam = () => {
+    if (!form.courseCode || !form.examDate) return alert("Course code and exam date are required");
+    const id = crypto.randomUUID();
+    const now = new Date();
+    const blocks = generateStudyBlocks({ startDate: now, examDate: new Date(form.examDate), preferredDailyStart: 18 });
+    const exam = {
+      id,
+      courseCode: form.courseCode.trim().toUpperCase(),
+      courseName: form.courseName.trim(),
+      examDate: new Date(form.examDate).toISOString(),
+      studyPlan: blocks,
+      createdAt: now.toISOString(),
+    };
+    setExams((list) => [exam, ...list]);
+    setForm((f) => ({ ...f, courseCode: "", courseName: "" }));
+  };
+
+  const removeExam = (id) => setExams((list) => list.filter((e) => e.id !== id));
+
+  const exportPlannerCSV = () => {
+    const rows = [["courseCode","courseName","examDate","blockStart","blockEnd","type"]];
+    exams.forEach((e) => {
+      e.studyPlan.forEach((b) => {
+        rows.push([e.courseCode, e.courseName, e.examDate, b.start, b.end, b.type]);
+      });
+    });
+    exportCSV("study_plans.csv", rows);
+  };
+
+  const importPlannerCSV = async (file) => {
+    const rows = await importCSV(file);
+    const [header, ...data] = rows;
+    const idx = Object.fromEntries(header.map((h, i) => [h, i]));
+    const grouped = {};
+    data.forEach((r) => {
+      const key = `${r[idx.courseCode]}|${r[idx.examDate]}`;
+      if (!grouped[key]) grouped[key] = { id: crypto.randomUUID(), courseCode: r[idx.courseCode], courseName: r[idx.courseName] || "", examDate: r[idx.examDate], studyPlan: [], createdAt: new Date().toISOString() };
+      grouped[key].studyPlan.push({ start: r[idx.blockStart], end: r[idx.blockEnd], type: r[idx.type] || "study" });
+    });
+    setExams(Object.values(grouped));
+  };
+
+  return (
+    <section className="space-y-6">
+      <div className="bg-white rounded-2xl shadow p-4 sm:p-6">
+        <h2 className="text-lg font-semibold mb-4">Add Exam</h2>
+        <div className="grid sm:grid-cols-4 gap-3">
+          <input className="border rounded-xl px-3 py-2" placeholder="Course code (e.g., MAT201)" value={form.courseCode} onChange={(e) => setForm({ ...form, courseCode: e.target.value })} />
+          <input className="border rounded-xl px-3 py-2" placeholder="Course name (optional)" value={form.courseName} onChange={(e) => setForm({ ...form, courseName: e.target.value })} />
+          <input type="datetime-local" className="border rounded-xl px-3 py-2" value={form.examDate} onChange={(e) => setForm({ ...form, examDate: e.target.value })} />
+          <button onClick={addExam} className="rounded-xl bg-black text-white font-medium px-4 py-2">Save & Generate Plan</button>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between">
+        <h3 className="font-semibold">Your Exams & Plans</h3>
+        <div className="flex items-center gap-2 text-sm">
+          <button onClick={exportPlannerCSV} className="px-3 py-1.5 rounded-lg border">Export CSV</button>
+          <label className="px-3 py-1.5 rounded-lg border cursor-pointer">
+            Import CSV
+            <input type="file" accept=".csv" className="hidden" onChange={(e) => e.target.files?.[0] && importPlannerCSV(e.target.files[0])} />
+          </label>
+        </div>
+      </div>
+
+      <div className="grid md:grid-cols-2 gap-4">
+        {exams.length === 0 && (
+          <div className="text-sm text-gray-500">No exams yet. Add one above to auto-generate a study plan.</div>
+        )}
+        {exams.map((e) => (
+          <article key={e.id} className="bg-white rounded-2xl shadow p-4">
+            <div className="flex items-start justify-between">
+              <div>
+                <h4 className="font-semibold text-base">{e.courseCode} <span className="text-gray-500">{e.courseName ? `• ${e.courseName}` : ""}</span></h4>
+                <p className="text-sm text-gray-600">Exam: {niceDateTime(e.examDate)}</p>
+              </div>
+              <button onClick={() => removeExam(e.id)} className="text-xs px-2 py-1 rounded bg-red-50 text-red-600">Delete</button>
+            </div>
+            <ul className="mt-3 divide-y">
+              {e.studyPlan.map((b, i) => (
+                <li key={i} className="py-2 flex items-center justify-between text-sm">
+                  <span>{new Date(b.start).toLocaleDateString()} • {new Date(b.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}–{new Date(b.end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                  <span className={`px-2 py-0.5 rounded-full text-xs ${b.type === 'revision' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>{b.type}</span>
+                </li>
+              ))}
+            </ul>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+// ---------------------- Opportunities ----------------------
+function Opportunities({ jobs, setJobs, saved, setSaved }) {
+  const [q, setQ] = useState("");
+  const [type, setType] = useState("all");
+  const [location, setLocation] = useState("all");
+
+  const filtered = useMemo(() => {
+    return jobs.filter((j) => {
+      const matchesQ = q ? (j.title + " " + j.org + " " + (j.tags || []).join(" ")).toLowerCase().includes(q.toLowerCase()) : true;
+      const matchesType = type === "all" ? true : j.type === type;
+      const matchesLoc = location === "all" ? true : (j.location?.toLowerCase() === location.toLowerCase());
+      return matchesQ && matchesType && matchesLoc;
+    });
+  }, [jobs, q, type, location]);
+
+  const addJob = (job) => setJobs((list) => [{ id: crypto.randomUUID(), createdAt: new Date().toISOString(), ...job }, ...list]);
+  const toggleSave = (id) => setSaved((s) => new Set(s.has(id) ? Array.from(s).filter((x) => x !== id) : [...Array.from(s), id]));
+
+  const exportJobsCSV = () => {
+    const rows = [["title","org","location","type","stipend","link","deadline","tags"]];
+    jobs.forEach((j) => rows.push([j.title,j.org,j.location||"",j.type||"",j.stipend||"",j.link||"",j.deadline||"",(j.tags||[]).join("|")]));
+    exportCSV("jobs.csv", rows);
+  };
+
+  const importJobsCSV = async (file) => {
+    const rows = await importCSV(file);
+    const [header, ...data] = rows;
+    const idx = Object.fromEntries(header.map((h, i) => [h, i]));
+    const newJobs = data.map((r) => ({
+      id: crypto.randomUUID(),
+      title: r[idx.title],
+      org: r[idx.org],
+      location: r[idx.location],
+      type: r[idx.type],
+      stipend: r[idx.stipend],
+      link: r[idx.link],
+      deadline: r[idx.deadline],
+      tags: (r[idx.tags] || "").split("|").filter(Boolean),
+      createdAt: new Date().toISOString(),
+    }));
+    setJobs((list) => [...newJobs, ...list]);
+  };
+
+  return (
+    <section className="space-y-6">
+      <div className="bg-white rounded-2xl shadow p-4 sm:p-6">
+        <h2 className="text-lg font-semibold mb-4">Find Opportunities</h2>
+        <div className="grid sm:grid-cols-4 gap-3">
+          <input className="border rounded-xl px-3 py-2" placeholder="Search title, org, tag" value={q} onChange={(e) => setQ(e.target.value)} />
+          <select className="border rounded-xl px-3 py-2" value={type} onChange={(e) => setType(e.target.value)}>
+            <option value="all">All types</option>
+            <option value="internship">Internship</option>
+            <option value="part-time">Part-time</option>
+            <option value="nysc">NYSC</option>
+            <option value="graduate">Graduate</option>
+          </select>
+          <select className="border rounded-xl px-3 py-2" value={location} onChange={(e) => setLocation(e.target.value)}>
+            <option value="all">All locations</option>
+            <option value="osogbo">Osogbo</option>
+            <option value="ile-ife">Ile-Ife</option>
+            <option value="ilesa">Ilesa</option>
+            <option value="ibadan">Ibadan</option>
+            <option value="remote">Remote</option>
+          </select>
+          <div className="flex gap-2">
+            <button onClick={exportJobsCSV} className="px-3 py-2 rounded-lg border text-sm">Export CSV</button>
+            <label className="px-3 py-2 rounded-lg border text-sm cursor-pointer">Import CSV
+              <input type="file" accept=".csv" className="hidden" onChange={(e) => e.target.files?.[0] && importJobsCSV(e.target.files[0])} />
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl shadow p-4 sm:p-6">
+        <h3 className="font-semibold mb-3">Add Opportunity (local only)</h3>
+        <AddJobForm onAdd={addJob} />
+      </div>
+
+      <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {filtered.length === 0 && <div className="text-sm text-gray-500">No results. Try clearing filters.</div>}
+        {filtered.map((j) => (
+          <article key={j.id} className="bg-white rounded-2xl border p-4 flex flex-col">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h4 className="font-semibold text-base">{j.title}</h4>
+                <p className="text-sm text-gray-600">{j.org} • {j.location || ""}</p>
+              </div>
+              <button onClick={() => toggleSave(j.id)} className={`text-xs px-2 py-1 rounded ${saved.has(j.id) ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100'}`}>{saved.has(j.id) ? 'Saved' : 'Save'}</button>
+            </div>
+            <div className="mt-2 text-xs text-gray-500">Type: {j.type || '—'} {j.stipend ? `• ₦${j.stipend}` : ''}</div>
+            <div className="mt-3 flex gap-2 flex-wrap">
+              {(j.tags || []).map((t, i) => (
+                <span key={i} className="text-xs bg-gray-100 px-2 py-0.5 rounded-full">{t}</span>
+              ))}
+            </div>
+            <div className="mt-auto pt-3 flex gap-2">
+              {j.link && <a href={j.link} target="_blank" rel="noreferrer" className="px-3 py-2 rounded-lg bg-black text-white text-sm">Apply</a>}
+              {j.deadline && <span className="text-xs text-gray-600 self-center">Deadline: {new Date(j.deadline).toLocaleDateString()}</span>}
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AddJobForm({ onAdd }) {
+  const [f, setF] = useState({ title: "", org: "", location: "", type: "internship", stipend: "", link: "", deadline: "", tags: "" });
+  const submit = (e) => {
+    e.preventDefault();
+    if (!f.title || !f.org) return alert("Title and organization are required");
+    const job = { ...f, tags: f.tags ? f.tags.split(",").map((t) => t.trim()).filter(Boolean) : [] };
+    onAdd(job);
+    setF({ title: "", org: "", location: "", type: "internship", stipend: "", link: "", deadline: "", tags: "" });
+  };
+  return (
+    <form onSubmit={submit} className="grid md:grid-cols-3 gap-3 text-sm">
+      <input className="border rounded-xl px-3 py-2" placeholder="Title" value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} />
+      <input className="border rounded-xl px-3 py-2" placeholder="Organization" value={f.org} onChange={(e) => setF({ ...f, org: e.target.value })} />
+      <input className="border rounded-xl px-3 py-2" placeholder="Location (e.g., Osogbo)" value={f.location} onChange={(e) => setF({ ...f, location: e.target.value })} />
+      <select className="border rounded-xl px-3 py-2" value={f.type} onChange={(e) => setF({ ...f, type: e.target.value })}>
+        <option value="internship">Internship</option>
+        <option value="part-time">Part-time</option>
+        <option value="nysc">NYSC</option>
+        <option value="graduate">Graduate</option>
+      </select>
+      <input className="border rounded-xl px-3 py-2" placeholder="Stipend (₦)" value={f.stipend} onChange={(e) => setF({ ...f, stipend: e.target.value })} />
+      <input className="border rounded-xl px-3 py-2" placeholder="Apply link (URL)" value={f.link} onChange={(e) => setF({ ...f, link: e.target.value })} />
+      <input type="date" className="border rounded-xl px-3 py-2" value={f.deadline} onChange={(e) => setF({ ...f, deadline: e.target.value })} />
+      <input className="border rounded-xl px-3 py-2 md:col-span-2" placeholder="Tags (comma-separated)" value={f.tags} onChange={(e) => setF({ ...f, tags: e.target.value })} />
+      <button className="rounded-xl bg-black text-white px-4 py-2">Add</button>
+    </form>
+  );
+}
+
+// ---------------------- Settings ----------------------
+function Settings({ settings, setSettings, requestNotif }) {
+  return (
+    <section className="space-y-6">
+      <div className="bg-white rounded-2xl shadow p-4 sm:p-6">
+        <h2 className="text-lg font-semibold mb-4">Notifications</h2>
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={!!settings.notificationsEnabled} onChange={(e) => setSettings((s) => ({ ...s, notificationsEnabled: e.target.checked }))} />
+            Enable browser notifications (best effort)
+          </label>
+          {!settings.notificationsEnabled && (
+            <button onClick={requestNotif} className="px-3 py-1.5 rounded-lg border text-sm">Request permission</button>
+          )}
+        </div>
+        <div className="mt-3 flex items-center gap-3">
+          <label className="text-sm">Daily reminder hour (24h):</label>
+          <input type="number" min={0} max={23} value={settings.dailyReminderHour} onChange={(e) => setSettings((s) => ({ ...s, dailyReminderHour: Number(e.target.value) }))} className="border rounded-xl px-3 py-1.5 w-24" />
+        </div>
+        <p className="mt-3 text-xs text-gray-500">Note: Browser notifications only trigger while the site is open. For reliable reminders, connect to WhatsApp or email in a future update.</p>
+      </div>
+
+      <div className="bg-white rounded-2xl shadow p-4 sm:p-6">
+        <h2 className="text-lg font-semibold mb-2">Data</h2>
+        <p className="text-sm text-gray-600">Your data is stored locally in your browser. You can clear it here.</p>
+        <button onClick={() => { localStorage.clear(); window.location.reload(); }} className="mt-3 px-3 py-2 rounded-lg bg-red-600 text-white text-sm">Clear local data</button>
+      </div>
+
+      <div className="bg-white rounded-2xl shadow p-4 sm:p-6">
+        <h2 className="text-lg font-semibold mb-2">About</h2>
+        <p className="text-sm text-gray-600">Osun Youth Connect helps students plan their exams and discover opportunities. Built as a public-good prototype. Later versions may add accounts, WhatsApp reminders, and admin-curated jobs.</p>
+      </div>
+    </section>
+  );
+}
+
+// ---------------------- Demo Jobs ----------------------
+const demoJobs = [
+  { id: crypto.randomUUID(), title: "Tech Support Intern", org: "Osogbo Tech Hub", location: "osogbo", type: "internship", stipend: "50000", link: "https://example.com", deadline: new Date(Date.now()+7*86400000).toISOString(), tags: ["IT","Support"], createdAt: new Date().toISOString() },
+  { id: crypto.randomUUID(), title: "Library Assistant (Part-time)", org: "UNIOSUN Library", location: "osogbo", type: "part-time", stipend: "30000", link: "https://example.com", deadline: new Date(Date.now()+12*86400000).toISOString(), tags: ["Library","Students"], createdAt: new Date().toISOString() },
+  { id: crypto.randomUUID(), title: "NYSC Teaching Opening", org: "Ife Secondary School", location: "ile-ife", type: "nysc", stipend: "", link: "https://example.com", deadline: new Date(Date.now()+20*86400000).toISOString(), tags: ["Teaching"], createdAt: new Date().toISOString() },
+  { id: crypto.randomUUID(), title: "Graduate Trainee (Retail)", org: "Ilesa Retail Group", location: "ilesa", type: "graduate", stipend: "120000", link: "https://example.com", deadline: new Date(Date.now()+30*86400000).toISOString(), tags: ["Sales","Graduate"], createdAt: new Date().toISOString() },
+];
